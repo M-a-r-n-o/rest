@@ -18,9 +18,11 @@ use Cundd\Rest\Exception\InvalidConfigurationException;
 use Cundd\Rest\Handler\CrudHandler;
 use Cundd\Rest\Handler\HandlerInterface;
 use Cundd\Rest\Http\RestRequestInterface;
+use LogicException;
 use Psr\Container\ContainerInterface;
 use TYPO3\CMS\Core\Utility\GeneralUtility;
 use TYPO3\CMS\Extbase\Object\ObjectManager as TYPO3ObjectManager;
+use function interface_exists;
 
 /**
  * Specialized Object Manager
@@ -30,26 +32,11 @@ use TYPO3\CMS\Extbase\Object\ObjectManager as TYPO3ObjectManager;
 class ObjectManager implements ObjectManagerInterface, SingletonInterface
 {
     /**
-     * @var DataProviderInterface
-     */
-    protected $dataProvider;
-
-    /**
-     * @var AuthenticationProviderInterface
-     */
-    protected $authenticationProvider;
-
-    /**
      * Configuration provider
      *
      * @var TypoScriptConfigurationProvider
      */
     protected $configurationProvider;
-
-    /**
-     * @var AccessControllerInterface
-     */
-    protected $accessController;
 
     /**
      * @var ContainerInterface|\TYPO3\CMS\Extbase\Object\ObjectManagerInterface
@@ -76,32 +63,31 @@ class ObjectManager implements ObjectManagerInterface, SingletonInterface
         return $this->get(ResponseFactoryInterface::class);
     }
 
-    public function getDataProvider(): DataProviderInterface
+    public function getDataProvider(RestRequestInterface $request = null): DataProviderInterface
     {
-        if (!$this->dataProvider) {
-            list($vendor, $extension, $model) = Utility::getClassNamePartsForResourceType(
-                $this->getRequest()->getResourceType()
-            );
-
-            $classes = [
-                // Check if an extension provides a Data Provider for the domain model
-                sprintf('Tx_%s_Rest_%sDataProvider', $extension, $model),
-                sprintf('%s%s\\Rest\\%sDataProvider', ($vendor ? $vendor . '\\' : ''), $extension, $model),
-
-                // Check if an extension provides a Data Provider
-                sprintf('Tx_%s_Rest_DataProvider', $extension),
-                sprintf('%s%s\\Rest\\DataProvider', ($vendor ? $vendor . '\\' : ''), $extension),
-
-                // Check for a specific builtin Data Provider
-                sprintf('Cundd\\Rest\\DataProvider\\%sDataProvider', $extension),
-            ];
-
-            $this->dataProvider = $this->get(
-                $this->getFirstExistingClass($classes, DataProviderInterface::class)
-            );
+        $resourceType = $request ? $request->getResourceType() : $this->getCurrentResourceType();
+        $dataProvider = $this->getImplementationFromResourceConfiguration($resourceType, 'DataProvider');
+        if ($dataProvider) {
+            return $dataProvider;
         }
 
-        return $this->dataProvider;
+        list($vendor, $extension, $model) = Utility::getClassNamePartsForResourceType($resourceType);
+
+        $classes = [
+            // @deprecated register a `dataProviderClass` instead. Will be remove in 5.0
+            // Check if an extension provides a Data Provider for the domain model
+            sprintf('Tx_%s_Rest_%sDataProvider', $extension, $model),
+            sprintf('%s%s\\Rest\\%sDataProvider', ($vendor ? $vendor . '\\' : ''), $extension, $model),
+
+            // Check if an extension provides a Data Provider
+            sprintf('Tx_%s_Rest_DataProvider', $extension),
+            sprintf('%s%s\\Rest\\DataProvider', ($vendor ? $vendor . '\\' : ''), $extension),
+
+            // Check for a specific builtin Data Provider
+            sprintf('Cundd\\Rest\\DataProvider\\%sDataProvider', $extension),
+        ];
+
+        return $this->get($this->getFirstExistingClass($classes, DataProviderInterface::class));
     }
 
     public function getRequestFactory(): RequestFactoryInterface
@@ -109,71 +95,62 @@ class ObjectManager implements ObjectManagerInterface, SingletonInterface
         return $this->get(RequestFactoryInterface::class);
     }
 
-    public function getAuthenticationProvider(): AuthenticationProviderInterface
+    public function getAuthenticationProvider(RestRequestInterface $request = null): AuthenticationProviderInterface
     {
-        if (!$this->authenticationProvider) {
-            list($vendor, $extension,) = Utility::getClassNamePartsForResourceType(
-                $this->getRequest()->getResourceType()
-            );
+        $resourceType = $request ? $request->getResourceType() : $this->getCurrentResourceType();
+        list($vendor, $extension,) = Utility::getClassNamePartsForResourceType($resourceType);
 
-            // Check if an extension provides a Authentication Provider
-            $authenticationProviderClass = 'Tx_' . $extension . '_Rest_AuthenticationProvider';
-            if (!class_exists($authenticationProviderClass)) {
-                $authenticationProviderClass = ($vendor ? $vendor . '\\' : '') . $extension . '\\Rest\\AuthenticationProvider';
-            }
+        // Check if an extension provides a Authentication Provider
+        $authenticationProviderClass = 'Tx_' . $extension . '_Rest_AuthenticationProvider';
+        if (!class_exists($authenticationProviderClass)) {
+            $authenticationProviderClass = ($vendor ? $vendor . '\\' : '') . $extension . '\\Rest\\AuthenticationProvider';
+        }
 
-            // Use the found Authentication Provider
-            if (class_exists($authenticationProviderClass)) {
-                $this->authenticationProvider = $this->get($authenticationProviderClass);
-            } else {
-                // Use the Authentication Providers defined in TypoScript
-                $providerInstances = [];
-                $configuredProviders = $this->getConfigurationProvider()->getSetting('authenticationProvider');
-                ksort($configuredProviders);
-                foreach ($configuredProviders as $providerClass) {
-                    if (class_exists($providerClass)) {
-                        $providerInstances[] = $this->get(ltrim($providerClass, '\\'));
-                    }
-                }
+        // Use the found Authentication Provider
+        if (class_exists($authenticationProviderClass)) {
+            return $this->get($authenticationProviderClass);
+        }
 
-                $this->authenticationProvider = call_user_func(
-                    [$this, 'get'],
-                    AuthenticationProviderCollection::class,
-                    $providerInstances
-                );
+        // Use the Authentication Providers defined in TypoScript
+        $providerInstances = [];
+        $configuredProviders = $this->getConfigurationProvider()->getSetting('authenticationProvider') ?? [];
+        ksort($configuredProviders);
+        foreach ($configuredProviders as $providerClass) {
+            if (class_exists($providerClass)) {
+                $providerInstances[] = $this->get(ltrim($providerClass, '\\'));
             }
         }
 
-        return $this->authenticationProvider;
+        return call_user_func(
+            [$this, 'get'],
+            AuthenticationProviderCollection::class,
+            $providerInstances
+        );
     }
 
-    public function getAccessController(): AccessControllerInterface
+    public function getAccessController(RestRequestInterface $request = null): AccessControllerInterface
     {
-        if (!$this->accessController) {
-            list($vendor, $extension,) = Utility::getClassNamePartsForResourceType(
-                $this->getRequest()->getResourceType()
-            );
+        $resourceType = $request ? $request->getResourceType() : $this->getCurrentResourceType();
+        list($vendor, $extension,) = Utility::getClassNamePartsForResourceType($resourceType);
 
-            // Check if an extension provides a Authentication Provider
+        // Check if an extension provides a Authentication Provider
+        $accessControllerClass = ($vendor ? $vendor . '\\' : '') . $extension . '\\Rest\\AccessController';
+        if (!class_exists($accessControllerClass)) {
             $accessControllerClass = 'Tx_' . $extension . '_Rest_AccessController';
-            if (!class_exists($accessControllerClass)) {
-                $accessControllerClass = ($vendor ? $vendor . '\\' : '') . $extension . '\\Rest\\AccessController';
-            }
-
-            // Use the configuration based Authentication Provider
-            if (!class_exists($accessControllerClass)) {
-                $accessControllerClass = ConfigurationBasedAccessController::class;
-            }
-            $this->accessController = $this->get($accessControllerClass);
         }
 
-        return $this->accessController;
+        // Use the configuration based Authentication Provider
+        if (!class_exists($accessControllerClass)) {
+            $accessControllerClass = ConfigurationBasedAccessController::class;
+        }
+
+        return $this->get($accessControllerClass);
     }
 
-    public function getHandler(): HandlerInterface
+    public function getHandler(RestRequestInterface $request = null): HandlerInterface
     {
-        $resourceType = $this->getRequest()->getResourceType();
-        $handler = $this->getHandlerFromResourceConfiguration($resourceType);
+        $resourceType = $request ? $request->getResourceType() : $this->getCurrentResourceType();
+        $handler = $this->getImplementationFromResourceConfiguration($resourceType, 'Handler');
         if ($handler) {
             return $handler;
         }
@@ -182,7 +159,7 @@ class ObjectManager implements ObjectManagerInterface, SingletonInterface
 
         $classes = [
             // Check if an extension provides a Handler
-            // @deprecated register a `handlerClass` instead
+            // @deprecated register a `handlerClass` instead. Will be remove in 5.0
             sprintf('%s%s\\Rest\\Handler', ($vendor ? $vendor . '\\' : ''), $extension),
             sprintf('Tx_' . $extension . '_Rest_Handler'),
 
@@ -211,21 +188,16 @@ class ObjectManager implements ObjectManagerInterface, SingletonInterface
         return $this->configurationProvider;
     }
 
-    /**
-     * Resets the managed objects
-     */
-    public function reassignRequest()
+    public function __call($name, $arguments)
     {
-        $this->dataProvider = null;
-        $this->authenticationProvider = null;
-        $this->configurationProvider = null;
-        $this->accessController = null;
+        return call_user_func_array([$this->container, $name], $arguments);
     }
 
     /**
      * Returns the current request
      *
      * @return RestRequestInterface
+     * @deprecated
      */
     protected function getRequest()
     {
@@ -238,7 +210,7 @@ class ObjectManager implements ObjectManagerInterface, SingletonInterface
      * @param string[] $classes
      * @param string   $default
      * @return string
-     * @throws \LogicException
+     * @throws LogicException
      */
     private function getFirstExistingClass(array $classes, $default = '')
     {
@@ -249,7 +221,7 @@ class ObjectManager implements ObjectManagerInterface, SingletonInterface
         }
 
         if ($default === '') {
-            throw new \LogicException('No existing class found');
+            throw new LogicException('No existing class found');
         }
 
         return $default;
@@ -257,9 +229,10 @@ class ObjectManager implements ObjectManagerInterface, SingletonInterface
 
     /**
      * @param ResourceType $resourceType
-     * @return HandlerInterface|null
+     * @param string       $type
+     * @return object|null|mixed
      */
-    private function getHandlerFromResourceConfiguration(ResourceType $resourceType)
+    private function getImplementationFromResourceConfiguration(ResourceType $resourceType, string $type)
     {
         $resourceConfiguration = $this->getConfigurationProvider()->getResourceConfiguration($resourceType);
         if (!$resourceConfiguration) {
@@ -268,26 +241,31 @@ class ObjectManager implements ObjectManagerInterface, SingletonInterface
                 sprintf('Resource "%s" is not configured', (string)$resourceType)
             );
         }
-        $handlerClass = $resourceConfiguration->getHandlerClass();
-        if (!$handlerClass) {
+
+        $getter = 'get' . ucfirst($type) . 'Class';
+        $implementation = $resourceConfiguration->$getter();
+        if (!$implementation) {
             return null;
         }
 
-        if (!class_exists($handlerClass)) {
+        if (!class_exists($implementation) && !interface_exists($implementation)) {
             throw new InvalidConfigurationException(
-                sprintf('Configured Handler "%s" does not exist', $handlerClass)
+                sprintf('Configured %s "%s" does not exist', $type, $implementation)
             );
         }
 
-        if ($handlerClass[0] === '\\') {
-            $handlerClass = substr($handlerClass, 1);
+        if ($implementation[0] === '\\') {
+            $implementation = substr($implementation, 1);
         }
 
-        return $this->get($handlerClass);
+        return $this->get($implementation);
     }
 
-    public function __call($name, $arguments)
+    /**
+     * @return ResourceType
+     */
+    private function getCurrentResourceType(): ResourceType
     {
-        return call_user_func_array([$this->container, $name], $arguments);
+        return $this->getRequestFactory()->getRequest()->getResourceType();
     }
 }

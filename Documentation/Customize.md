@@ -18,16 +18,18 @@ The following lines configure read and write access to all paths matching
 `cundd-custom_rest-*`. This allows calls to `your-domain.com/rest/cundd-custom_rest-route`, 
 `your-domain.com/rest/cundd-custom_rest-path`, `your-domain.com/rest/cundd-custom_rest-whatever`, etc.
 
-	plugin.tx_rest.settings.paths {
-		cundd-custom_rest {
-			path = cundd-custom_rest-*
+```typo3_typoscript
+plugin.tx_rest.settings.paths {
+    cundd-custom_rest {
+        path = cundd-custom_rest-*
 
-			read = allow
-			write = allow
-			
-			handlerClass = \Cundd\CustomRest\Rest\Handler
-		}
-	}
+        read = allow
+        write = allow
+
+        handlerClass = \Cundd\CustomRest\Rest\Handler
+    }
+}
+```
 
 File: [ext_typoscript_setup.txt](https://github.com/cundd/custom_rest/blob/master/ext_typoscript_setup.txt)
 
@@ -38,9 +40,11 @@ Configure an alias
 The paths shown above are not esthetic, but enable the extensions flexibility. To still provide pretty URLs aliases can 
 be registered.
 
-	plugin.tx_rest.settings.aliases {
-		customhandler = cundd-custom_rest-custom_handler
-	}
+```typo3_typoscript
+plugin.tx_rest.settings.aliases {
+    customhandler = cundd-custom_rest-custom_handler
+}
+```
 
 File: [ext_typoscript_setup.txt](https://github.com/cundd/custom_rest/blob/master/ext_typoscript_setup.txt)
 
@@ -226,6 +230,21 @@ Route::get($request->getResourceType() . '/{boolean}', function(RestRequestInter
     // with $theParameter set to true
 });
 ```
+
+
+### Matching anything aka. `raw`
+
+Extracts the value from segments matching the regular expression `[^/]+`
+
+```php
+Route::get($request->getResourceType() . '/{raw}', function(RestRequestInterface $request, $theParameter) {
+    // Callback will be invoked for
+    # curl -X GET http://localhost:8888/rest/customhandler/Mr Müller
+    // with $theParameter set to 'Mr%20Müller'
+});
+```
+
+> The parameter value will not be decoded before being passed to the route callback
 
 
 Response

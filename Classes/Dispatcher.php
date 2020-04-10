@@ -4,11 +4,13 @@ declare(strict_types=1);
 namespace Cundd\Rest;
 
 use Cundd\Rest\Dispatcher\DispatcherInterface;
+use Cundd\Rest\Exception\InvalidResourceTypeException;
 use Cundd\Rest\Http\Header;
 use Cundd\Rest\Http\RestRequestInterface;
 use Cundd\Rest\Log\LoggerInterface;
 use Cundd\Rest\Router\ResultConverter;
 use Cundd\Rest\Router\RouterInterface;
+use Cundd\Rest\Utility\DebugUtility;
 use Psr\Http\Message\ResponseInterface;
 use Psr\Http\Message\ServerRequestInterface;
 use TYPO3\CMS\Core\Utility\GeneralUtility;
@@ -44,7 +46,7 @@ class Dispatcher implements SingletonInterface, DispatcherInterface
     /**
      * The shared instance
      *
-     * @var \Cundd\Rest\Dispatcher
+     * @var Dispatcher
      */
     protected static $sharedDispatcher;
 
@@ -76,32 +78,29 @@ class Dispatcher implements SingletonInterface, DispatcherInterface
      * Entry point for the PSR 7 middleware
      *
      * @param ServerRequestInterface $request
-     * @param ResponseInterface      $response
      * @return ResponseInterface
      * @throws \Exception
      */
-    public function processRequest(ServerRequestInterface $request, ResponseInterface $response)
+    public function processRequest(ServerRequestInterface $request): ResponseInterface
     {
         $this->requestFactory->registerCurrentRequest($request);
-        if (method_exists($this->objectManager, 'reassignRequest')) {
-            $this->objectManager->reassignRequest();
-        }
 
-        return $this->dispatch($this->requestFactory->getRequest(), $response);
+        return $this->dispatch($this->requestFactory->getRequest());
     }
 
     /**
      * Dispatch the REST request
      *
      * @param RestRequestInterface $request
-     * @param ResponseInterface    $response
      * @return ResponseInterface
      */
-    public function dispatch(RestRequestInterface $request, ResponseInterface $response)
+    public function dispatch(RestRequestInterface $request): ResponseInterface
     {
+        $response = $this->dispatchInternal($request);
+
         return $this->addCorsHeaders(
             $request,
-            $this->addAdditionalHeaders($this->dispatchInternal($request, $response))
+            $this->addAdditionalHeaders($this->addDebugHeaders($request, $response))
         );
     }
 
@@ -109,14 +108,10 @@ class Dispatcher implements SingletonInterface, DispatcherInterface
      * Checks the cache for an entry for the current request and returns it, or calls the handler if nothing is found
      *
      * @param RestRequestInterface $request
-     * @param ResponseInterface    $response
      * @return ResponseInterface
      */
-    private function getCachedResponseOrCallHandler(
-        RestRequestInterface $request,
-        /** @noinspection PhpUnusedParameterInspection */
-        ResponseInterface $response
-    ) {
+    private function getCachedResponseOrCallHandler(RestRequestInterface $request)
+    {
         $cache = $this->objectManager->getCache($request->getResourceType());
         $cachedResponse = $cache->getCachedValueForRequest($request);
 
@@ -161,7 +156,7 @@ class Dispatcher implements SingletonInterface, DispatcherInterface
         $this->logger->logRequest(sprintf('path: "%s" method: "%s"', $requestPath, $request->getMethod()));
 
         // If a path is given let the handler build up the routes
-        $this->objectManager->getHandler()->configureRoutes($resultConverter, $request);
+        $this->objectManager->getHandler($request)->configureRoutes($resultConverter, $request);
 
         ErrorHandler::registerHandler();
 
@@ -197,7 +192,7 @@ class Dispatcher implements SingletonInterface, DispatcherInterface
     /**
      * Returns the shared dispatcher instance
      *
-     * @return \Cundd\Rest\Dispatcher
+     * @return Dispatcher
      */
     public static function getSharedDispatcher()
     {
@@ -252,10 +247,9 @@ class Dispatcher implements SingletonInterface, DispatcherInterface
 
     /**
      * @param RestRequestInterface $request
-     * @param ResponseInterface    $response
      * @return ResponseInterface
      */
-    private function dispatchInternal(RestRequestInterface $request, ResponseInterface $response): ResponseInterface
+    private function dispatchInternal(RestRequestInterface $request): ResponseInterface
     {
         $requestPath = $request->getPath();
         if (!$requestPath || $requestPath === '/') {
@@ -263,11 +257,18 @@ class Dispatcher implements SingletonInterface, DispatcherInterface
         }
 
         // Checks if the request needs authentication
-        $access = $this->objectManager->getAccessController()->getAccess($request);
+        $access = $this->objectManager->getAccessController($request)->getAccess($request);
         switch (true) {
             case $access->isAllowed():
             case $access->isAuthorized():
-                break;
+                $newResponse = $this->getCachedResponseOrCallHandler($request);
+
+                $this->logger->logResponse(
+                    'response: ' . $newResponse->getStatusCode(),
+                    ['response' => (string)$newResponse->getBody()]
+                );
+
+                return $newResponse;
 
             case $access->isUnauthorized():
                 return $this->responseFactory->createErrorResponse('Unauthorized', 401, $request);
@@ -276,15 +277,6 @@ class Dispatcher implements SingletonInterface, DispatcherInterface
             default:
                 return $this->responseFactory->createErrorResponse('Forbidden', 403, $request);
         }
-
-        $newResponse = $this->getCachedResponseOrCallHandler($request, $response);
-
-        $this->logger->logResponse(
-            'response: ' . $newResponse->getStatusCode(),
-            ['response' => (string)$newResponse->getBody()]
-        );
-
-        return $newResponse;
     }
 
     /**
@@ -298,25 +290,47 @@ class Dispatcher implements SingletonInterface, DispatcherInterface
         ?array $defaultResponseHeaders,
         bool $overwrite
     ): ResponseInterface {
-        foreach ((array)$defaultResponseHeaders as $responseHeaderType2 => $value2) {
+        foreach ((array)$defaultResponseHeaders as $responseHeaderType => $value) {
             // If the header is already set skip it unless `$overwrite` is TRUE
-            if (!$overwrite && $response->getHeaderLine($responseHeaderType2)) {
+            if (!$overwrite && $response->getHeaderLine($responseHeaderType)) {
                 continue;
             }
 
-            if (is_string($value2)) {
+            if (is_string($value)) {
                 $response = $response->withHeader(
-                    $responseHeaderType2,
-                    $value2
+                    $responseHeaderType,
+                    $value
                 );
-            } elseif (is_array($value2) && array_key_exists('userFunc', $value2)) {
+            } elseif (is_array($value) && array_key_exists('userFunc', $value)) {
+                $value['response'] = $response;
                 $response = $response->withHeader(
-                    rtrim($responseHeaderType2, '.'),
-                    GeneralUtility::callUserFunction($value2['userFunc'], $value2, $this)
+                    rtrim($responseHeaderType, '.'),
+                    GeneralUtility::callUserFunction($value['userFunc'], $value, $this)
                 );
             }
         }
 
         return $response;
+    }
+
+    private function addDebugHeaders(RestRequestInterface $request, ResponseInterface $response): ResponseInterface
+    {
+        if (!DebugUtility::allowDebugInformation()) {
+            return $response;
+        }
+
+        try {
+            $resourceConfiguration = $this->objectManager->getConfigurationProvider()
+                ->getResourceConfiguration($request->getResourceType());
+        } catch (InvalidResourceTypeException $exception) {
+            return $response;
+        }
+
+        return $response
+            ->withAddedHeader(Header::CUNDD_REST_RESOURCE_TYPE, (string)$request->getResourceType())
+            ->withAddedHeader(Header::CUNDD_REST_PATH, (string)$request->getPath())
+            ->withAddedHeader(Header::CUNDD_REST_HANDLER, $resourceConfiguration->getHandlerClass())
+            ->withAddedHeader(Header::CUNDD_REST_DATA_PROVIDER, $resourceConfiguration->getDataProviderClass())
+            ->withAddedHeader(Header::CUNDD_REST_ALIASES, $resourceConfiguration->getAliases());
     }
 }

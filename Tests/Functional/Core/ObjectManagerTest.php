@@ -10,6 +10,7 @@ use Cundd\Rest\Authentication\CredentialsAuthenticationProvider;
 use Cundd\Rest\Authentication\RequestAuthenticationProvider;
 use Cundd\Rest\Configuration\ConfigurationProviderInterface;
 use Cundd\Rest\Configuration\ResourceConfiguration;
+use Cundd\Rest\Configuration\StandaloneConfigurationProvider;
 use Cundd\Rest\Configuration\TypoScriptConfigurationProvider;
 use Cundd\Rest\DataProvider\DataProvider;
 use Cundd\Rest\DataProvider\DataProviderInterface;
@@ -23,10 +24,16 @@ use Cundd\Rest\RequestFactoryInterface;
 use Cundd\Rest\ResponseFactory;
 use Cundd\Rest\ResponseFactoryInterface;
 use Cundd\Rest\Tests\Functional\AbstractCase;
+use Exception;
 use Prophecy\Argument;
 use Prophecy\Prophecy\MethodProphecy;
 use Prophecy\Prophecy\ObjectProphecy;
 
+/**
+ * Functional tests for the ObjectManager
+ *
+ * @see \Cundd\Rest\Tests\Unit\Core\ObjectManagerTest for Unit tests
+ */
 class ObjectManagerTest extends AbstractCase
 {
     /**
@@ -41,7 +48,7 @@ class ObjectManagerTest extends AbstractCase
         $this->registerLoggerImplementation();
 
         $this->fixture = new ObjectManager();
-        $this->injectConfigurationProviderUsingHandlerClass('');
+        $this->injectConfigurationProviderUsingHandlerClass();
     }
 
     public function tearDown()
@@ -89,7 +96,7 @@ class ObjectManagerTest extends AbstractCase
      */
     public function getAuthenticationProviderTest()
     {
-        $this->injectConfigurationProviderUsingHandlerClass('', ['authenticationProvider' => []]);
+        $this->injectConfigurationProviderUsingHandlerClass(['authenticationProvider' => []], '');
         $object = $this->fixture->getAuthenticationProvider();
         $this->assertInstanceOf(AuthenticationProviderInterface::class, $object);
     }
@@ -100,14 +107,14 @@ class ObjectManagerTest extends AbstractCase
     public function getAuthenticationProviderFromConfigurationTest()
     {
         $this->injectConfigurationProviderUsingHandlerClass(
-            '',
             [
                 'authenticationProvider' => [
                     30 => RequestAuthenticationProvider::class,
                     50 => CredentialsAuthenticationProvider::class,
                     10 => BasicAuthenticationProvider::class,
                 ],
-            ]
+            ],
+            ''
         );
         /** @var AuthenticationProviderCollection $object */
         $object = $this->fixture->getAuthenticationProvider();
@@ -125,7 +132,7 @@ class ObjectManagerTest extends AbstractCase
      * @param string $url
      * @param string $expectedClass
      * @param array  $classToBuild
-     * @throws \Exception
+     * @throws Exception
      */
     public function getDataProviderTest($url, $expectedClass, $classToBuild = [])
     {
@@ -134,7 +141,7 @@ class ObjectManagerTest extends AbstractCase
             $this->buildClass($classToBuild);
         }
 
-        $dataProvider = $this->fixture->getDataProvider();
+        $dataProvider = $this->fixture->getDataProvider($this->buildTestRequest($url));
         $this->assertInstanceOf($expectedClass, $dataProvider);
         $this->assertInstanceOf(DataProviderInterface::class, $dataProvider);
         $this->assertInstanceOf(DataProvider::class, $dataProvider);
@@ -227,7 +234,7 @@ class ObjectManagerTest extends AbstractCase
      * @param string $url
      * @param string $expectedClass
      * @param array  $classToBuild
-     * @throws \Exception
+     * @throws Exception
      */
     public function getHandlerTest($url, $expectedClass, $classToBuild = [])
     {
@@ -236,7 +243,7 @@ class ObjectManagerTest extends AbstractCase
             $this->buildClass($classToBuild);
         }
 
-        $handler = $this->fixture->getHandler();
+        $handler = $this->fixture->getHandler($this->buildTestRequest($url));
         $this->assertInstanceOf($expectedClass, $handler);
         $this->assertInstanceOf(HandlerInterface::class, $handler);
         $this->assertInstanceOf(CrudHandler::class, $handler);
@@ -311,12 +318,12 @@ class ObjectManagerTest extends AbstractCase
      */
     public function getHandlerFromResourceTest()
     {
-        $expectedHandler = 'Tx_MyExt_Rest_Handler' . time();
+        $expectedHandler = '\\Vendor\\Ext' . time() . '\\Rest\\Handler';
         $this->buildClass([$expectedHandler, '', CrudHandler::class]);
 
-        $resourceType = new ResourceType('my_secondext-my_model');
+        $resourceType = new ResourceType('some_extension-my_model');
         $resourceTypeString = (string)$resourceType;
-        $configurationProvider = new TypoScriptConfigurationProvider();
+        $configurationProvider = new StandaloneConfigurationProvider([]);
         $configurationProvider->setSettings(
             [
                 'paths' => [
@@ -330,23 +337,32 @@ class ObjectManagerTest extends AbstractCase
 
         $_GET['u'] = $resourceTypeString;
 
-        $handler = $this->fixture->getHandler();
+        $handler = $this->fixture->getHandler($this->buildTestRequest($resourceTypeString));
         $this->assertInstanceOf($expectedHandler, $handler);
         $this->assertInstanceOf(HandlerInterface::class, $handler);
         $this->assertInstanceOf(CrudHandler::class, $handler);
     }
 
     /**
-     * @param string $handler
      * @param array  $settings
+     * @param string $handler
+     * @param string $dataProvider
      */
-    private function injectConfigurationProviderUsingHandlerClass($handler, array $settings = [])
-    {
+    private function injectConfigurationProviderUsingHandlerClass(
+        array $settings = [],
+        string $handler = '',
+        string $dataProvider = ''
+    ) {
         /** @var ObjectProphecy|ResourceConfiguration $resourceConfiguration */
         $resourceConfiguration = $this->prophesize(ResourceConfiguration::class);
-        /** @var MethodProphecy|string $handlerClass */
-        $handlerClass = $resourceConfiguration->getHandlerClass();
-        $handlerClass->willReturn($handler);
+        /** @var MethodProphecy|string $handlerClassMethod */
+        $handlerClassMethod = $resourceConfiguration->getHandlerClass();
+        $handlerClassMethod->willReturn($handler);
+
+        /** @var MethodProphecy|string $dataProviderClassMethod */
+        $dataProviderClassMethod = $resourceConfiguration->getDataProviderClass();
+        $dataProviderClassMethod->willReturn($dataProvider);
+
         /** @var ObjectProphecy|ConfigurationProviderInterface $configurationProvider */
         $configurationProvider = $this->prophesize(ConfigurationProviderInterface::class);
         /** @var ResourceType $resourceType */

@@ -3,10 +3,10 @@ declare(strict_types=1);
 
 namespace Cundd\Rest\Router;
 
-
 use Cundd\Rest\Domain\Model\ResourceType;
 use Cundd\Rest\Http\RestRequestInterface;
 use Cundd\Rest\Router\Exception\NotFoundException;
+use InvalidArgumentException;
 use Psr\Http\Message\ResponseInterface;
 
 /**
@@ -28,12 +28,16 @@ class Router implements RouterInterface
      */
     public function dispatch(RestRequestInterface $request)
     {
-        $parameters = $this->getPreparedParameters($request);
         $route = $this->getMatchingRoute($request);
-
         if (!$route) {
-            return new NotFoundException();
+            return NotFoundException::exceptionWithAlternatives(
+                $request->getPath(),
+                $request->getMethod(),
+                $this->getRoutesForMethod($request)
+            );
         }
+
+        $parameters = $this->getPreparedParametersForRoute($request, $route);
 
         return $route->process($request, ...$parameters);
     }
@@ -118,14 +122,14 @@ class Router implements RouterInterface
      */
     public function getMatchingRoutes(RestRequestInterface $request)
     {
-        $method = $request->getMethod();
-        if (!isset($this->registeredRoutes[$method])) {
+        $registeredRoutes = $this->getRoutesForMethod($request);
+        if (empty($registeredRoutes)) {
             return [];
         }
 
         $path = $request->getPath();
         $matchingRoutes = [];
-        foreach ($this->registeredRoutes[$method] as $pattern => $route) {
+        foreach ($registeredRoutes as $pattern => $route) {
             $regularExpression = $this->patternToRegularExpression($pattern);
             if (preg_match($regularExpression, $path)) {
                 $matchingRoutes[$pattern] = $route;
@@ -148,6 +152,18 @@ class Router implements RouterInterface
             return [];
         }
 
+        return $this->getPreparedParametersForRoute($request, $route);
+    }
+
+    /**
+     * Returns the prepared parameters
+     *
+     * @param RestRequestInterface $request
+     * @param RouteInterface       $route
+     * @return array
+     */
+    private function getPreparedParametersForRoute(RestRequestInterface $request, RouteInterface $route)
+    {
         $segments = explode('/', $request->getPath());
         $parameters = [];
         foreach ($route->getParameters() as $index => $type) {
@@ -167,6 +183,7 @@ class Router implements RouterInterface
     private function getPreparedParameter($type, $segment)
     {
         switch ($type) {
+            case ParameterTypeInterface::RAW:
             case ParameterTypeInterface::SLUG:
                 return (string)$segment;
             case ParameterTypeInterface::BOOLEAN:
@@ -176,7 +193,7 @@ class Router implements RouterInterface
             case ParameterTypeInterface::FLOAT:
                 return filter_var($segment, FILTER_VALIDATE_FLOAT);
             default:
-                throw new \InvalidArgumentException(sprintf('Invalid parameter type "%s"', $type));
+                throw new InvalidArgumentException(sprintf('Invalid parameter type "%s"', $type));
         }
     }
 
@@ -188,6 +205,7 @@ class Router implements RouterInterface
     {
         $outputPattern = $pattern;
         $parameterTypeToRegex = [
+            ParameterTypeInterface::RAW     => '[^/]+',
             ParameterTypeInterface::SLUG    => '[a-zA-Z0-9\._\-]+',
             ParameterTypeInterface::INTEGER => '[0-9]+',
             ParameterTypeInterface::FLOAT   => '[0-9]+\.[0-9]+',
@@ -232,5 +250,14 @@ class Router implements RouterInterface
         );
 
         return $matchingRoutes;
+    }
+
+    /**
+     * @param RestRequestInterface $request
+     * @return array
+     */
+    private function getRoutesForMethod(RestRequestInterface $request): array
+    {
+        return $this->registeredRoutes[$request->getMethod()] ?? [];
     }
 }
